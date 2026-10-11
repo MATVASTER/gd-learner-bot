@@ -1,7 +1,3 @@
-#define WIN32_LEAN_AND_MEAN
-#include <winsock2.h>
-#include <ws2tcpip.h>
-
 #include <Geode/Geode.hpp>
 #include <Geode/modify/PlayLayer.hpp>
 #include <algorithm>
@@ -40,8 +36,8 @@ static bool connectToPython() {
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(5555);
-    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
-
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    
     if (connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
         closesocket(s);
         return false;
