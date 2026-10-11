@@ -29,14 +29,17 @@ class $modify(BotPlayLayer, PlayLayer) {
     }
 
     // Nervios segun la cercania al mejor progreso
+    // Nervios segun la cercania al mejor progreso
     float targetNerves(float p, float best) {
-        if (best <= 1.f) return 0.1f;          // aun no tiene record: tranquilo
+        const float MIN_RECORD = 20.f;         // por debajo de este record no hay nervios
+        if (best < MIN_RECORD) return 0.1f;
         if (p >= best) return 1.0f;            // zona desconocida: maximo
-        float d = best - p;                    // puntos de % que faltan
-        float k = std::clamp(1.f - d / 15.f, 0.f, 1.f); // empieza a subir 15% antes
+        float window = std::min(15.f, best * 0.5f); // desde cuantos % antes empieza a subir
+        float d = best - p;
+        float k = std::clamp(1.f - d / window, 0.f, 1.f);
         return 0.1f + 0.9f * k;
     }
-
+    
     void resetLevel() {
         PlayLayer::resetLevel();
         m_fields->timer = 0.f;
@@ -56,7 +59,7 @@ class $modify(BotPlayLayer, PlayLayer) {
         float p = this->getCurrentPercent();
         float best = this->bestPercent();
         float target = (botOn && nervesOn) ? this->targetNerves(p, best) : 0.1f;
-        m_fields->nerves += (target - m_fields->nerves) * std::min(1.f, dt * 1.5f);
+        m_fields->nerves += (target - m_fields->nerves) * std::min(1.f, dt * 0.4f);
 
         float bpm = 70.f + 110.f * m_fields->nerves;
         m_fields->phase += dt * (bpm / 60.f) * 6.2831853f;
