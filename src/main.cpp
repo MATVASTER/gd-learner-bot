@@ -75,11 +75,22 @@ static int modeOf(PlayerObject* pl) {
     return 0;
 }
 
+// Hitbox real de un peligro: circulo para sierras, rectangulo de colision para el resto
+static CCRect hazardRect(GameObject* o) {
+    float r = o->m_objectRadius;
+    if (r > 0.f) {
+        return CCRect(o->getPositionX() - r, o->getPositionY() - r, r * 2.f, r * 2.f);
+    }
+    return o->getObjectRect();
+}
+
 // Lo que ve de cada columna desde la altura de un jugador
 struct Col {
     float below = 90.f;
     float above = 0.f;
     float hazRel = 0.f;
+    float hazBot = 0.f;
+    float hazTop = 0.f;
     float bestHaz = 1e9f;
     int block = 0;
     int haz = 0;
@@ -278,13 +289,14 @@ class $modify(BotPlayLayer, PlayLayer) {
                   m_fields->rawSlopes.size(), m_fields->rawSpecials.size());
     }
 
-    // Suelo, techo, muros y pinchos de cada columna, vistos desde la altura refY
+    // Suelo, techo, muros y peligros de cada columna, vistos desde la altura refY
     void scanCols(float refY, float px, Col* out) {
         for (int k = 0; k < K; k++) {
             out[k] = Col();
             out[k].above = refY + 999.f;
         }
         for (auto o : m_fields->rawSolids) {
+            if (o->m_isPassable) continue;
             float ox = o->getPositionX();
             if (ox < px - 100.f || ox > px + 620.f) continue;
             CCRect r = o->getObjectRect();
@@ -304,14 +316,31 @@ class $modify(BotPlayLayer, PlayLayer) {
         }
         for (auto o : m_fields->rawHazards) {
             float ox = o->getPositionX();
-            int k = static_cast<int>(std::floor((ox - px) / 30.f));
-            if (k < 0 || k >= K) continue;
-            float oy = o->getPositionY();
-            out[k].haz = 1;
-            float d = std::fabs(oy - refY);
-            if (d < out[k].bestHaz) {
-                out[k].bestHaz = d;
-                out[k].hazRel = clampv((oy - refY) / 60.f, -3.f, 3.f);
+            if (ox < px - 100.f || ox > px + 620.f) continue;
+            CCRect r = hazardRect(o);
+            int a = std::max(static_cast<int>(std::floor((r.getMinX() + 1.f - px) / 30.f)), 0);
+            int b = std::min(static_cast<int>(std::floor((r.getMaxX() - 1.f - px) / 30.f)), K - 1);
+            if (b < a) b = a;
+            if (a >= K) continue;
+            float bot = r.getMinY();
+            float top = r.getMaxY();
+            float dv = 0.f;
+            float rel = 0.f;
+            if (refY < bot) {
+                dv = bot - refY;
+                rel = dv / 60.f;
+            } else if (refY > top) {
+                dv = refY - top;
+                rel = -dv / 60.f;
+            }
+            for (int k = a; k <= b; k++) {
+                out[k].haz = 1;
+                if (dv < out[k].bestHaz) {
+                    out[k].bestHaz = dv;
+                    out[k].hazRel = clampv(rel, -3.f, 3.f);
+                    out[k].hazBot = clampv((bot - refY) / 60.f, -3.f, 3.f);
+                    out[k].hazTop = clampv((top - refY) / 60.f, -3.f, 3.f);
+                }
             }
         }
     }
@@ -347,26 +376,36 @@ class $modify(BotPlayLayer, PlayLayer) {
         int passed = static_cast<int>(
             std::lower_bound(m_fields->clusterX.begin(), m_fields->clusterX.end(), px) -
             m_fields->clusterX.begin());
+        float portalY = static_cast<float>(m_gameState.m_portalY);
 
         std::string s = fmt::format(
-            "{},{:.4f},{},{},{:.2f},{:.3f},{},{},{},{:.2f},{},{},{:.2f},{:.3f},{},{},{}",
+            "{},{:.4f},{},{},{:.2f},{:.3f},{},{},{},{:.2f},{},{},{:.2f},{:.3f},{},{},{},{:.1f}",
             status, p, levelId, passed, y, yv, ground, upside, mini, speed, mode,
-            dual ? 1 : 0, y2, yv2, ground2, upside2, mode2);
+            dual ? 1 : 0, y2, yv2, ground2, upside2, mode2, portalY);
 
         Col c1[K];
         Col c2[K];
         this->scanCols(y, px, c1);
         if (dual) this->scanCols(y2, px, c2);
 
-        // rampas y objetos especiales (siempre desde el jugador 1)
-        struct Slp { int has = 0; float rel = 0.f; float sn = 0.f; float cs = 0.f; float flip = 0.f; float best = 1e9f; };
+        // rampas, objetos especiales y teletransportes (siempre desde el jugador 1)
+        struct Slp {
+            int has = 0;
+            float surf = 0.f;
+            int floorTop = 0;
+            int uphill = 0;
+            int hazard = 0;
+            float best = 1e9f;
+        };
         Slp slp[K];
         int flags[K][NFLAG];
         float specRel[K];
         float bestSpec[K];
+        float tele[K];
         for (int k = 0; k < K; k++) {
             specRel[k] = 0.f;
             bestSpec[k] = 1e9f;
+            tele[k] = 0.f;
             for (int j = 0; j < NFLAG; j++) flags[k][j] = 0;
         }
 
@@ -376,18 +415,17 @@ class $modify(BotPlayLayer, PlayLayer) {
             CCRect r = o->getObjectRect();
             int a = std::max(static_cast<int>(std::floor((r.getMinX() + 1.f - px) / 30.f)), 0);
             int b = std::min(static_cast<int>(std::floor((r.getMaxX() - 1.f - px) / 30.f)), K - 1);
-            float cy = (r.getMinY() + r.getMaxY()) * 0.5f;
-            float d = std::fabs(cy - y);
-            float rad = o->getRotation() * 0.0174533f;
-            float flip = ((o->isFlipX() ? 1.f : 0.f) + (o->isFlipY() ? 2.f : 0.f)) / 3.f;
             for (int k = a; k <= b; k++) {
+                float xc = clampv(px + (static_cast<float>(k) + 0.5f) * 30.f, r.getMinX(), r.getMaxX());
+                float sy = static_cast<float>(o->slopeYPos(xc));
+                float d = std::fabs(sy - y);
                 if (d < slp[k].best) {
                     slp[k].best = d;
                     slp[k].has = 1;
-                    slp[k].rel = clampv((cy - y) / 60.f, -3.f, 3.f);
-                    slp[k].sn = std::sin(rad);
-                    slp[k].cs = std::cos(rad);
-                    slp[k].flip = flip;
+                    slp[k].surf = clampv((sy - y) / 60.f, -3.f, 3.f);
+                    slp[k].floorTop = o->slopeFloorTop() ? 1 : 0;
+                    slp[k].uphill = o->m_slopeUphill ? 1 : 0;
+                    slp[k].hazard = o->m_slopeIsHazard ? 1 : 0;
                 }
             }
         }
@@ -402,20 +440,26 @@ class $modify(BotPlayLayer, PlayLayer) {
                 bestSpec[k] = d;
                 specRel[k] = clampv((oy - y) / 60.f, -3.f, 3.f);
             }
+            if (pr.first->m_objectType == GameObjectType::TeleportPortal) {
+                auto tp = static_cast<TeleportPortalObject*>(pr.first);
+                if (tp->m_orangePortal) {
+                    tele[k] = clampv((tp->m_orangePortal->getPositionY() - y) / 60.f, -3.f, 3.f);
+                }
+            }
         }
 
         for (int k = 0; k < K; k++) {
-            // jugador 1
+            // jugador 1: suelo, techo, muro, peligro (+ su extension vertical)
             float relBelow = clampv((c1[k].below - y) / 60.f, -3.f, 0.f);
             float relAbove = clampv((c1[k].above - y) / 60.f, 0.f, 3.f);
-            s += fmt::format(",{:.2f},{:.2f},{},{},{:.2f}", relBelow, relAbove,
-                             c1[k].block, c1[k].haz, c1[k].hazRel);
+            s += fmt::format(",{:.2f},{:.2f},{},{},{:.2f},{:.2f},{:.2f}", relBelow, relAbove,
+                             c1[k].block, c1[k].haz, c1[k].hazRel, c1[k].hazBot, c1[k].hazTop);
             // rampa
-            s += fmt::format(",{},{:.2f},{:.2f},{:.2f},{:.2f}", slp[k].has, slp[k].rel,
-                             slp[k].sn, slp[k].cs, slp[k].flip);
+            s += fmt::format(",{},{:.2f},{},{},{}", slp[k].has, slp[k].surf,
+                             slp[k].floorTop, slp[k].uphill, slp[k].hazard);
             // pads, orbes, portales
             for (int j = 0; j < NFLAG; j++) s += fmt::format(",{}", flags[k][j]);
-            s += fmt::format(",{:.2f}", specRel[k]);
+            s += fmt::format(",{:.2f},{:.2f}", specRel[k], tele[k]);
             // jugador 2 (ceros si no hay dual)
             if (dual) {
                 float rb2 = clampv((c2[k].below - y2) / 60.f, -3.f, 0.f);
