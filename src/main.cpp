@@ -4,11 +4,36 @@
 #include <cmath>
 #include <cstdlib>
 #include <string>
+#include <vector>
 
 using namespace geode::prelude;
 
 static float rand01() {
     return static_cast<float>(std::rand()) / static_cast<float>(RAND_MAX);
+}
+
+// ---------- Ojos ----------
+struct Pt {
+    float x;
+    float y;
+};
+
+// Llena 'out' con (dx, dy) de los 'count' objetos mas cercanos por delante
+static void lookAhead(const std::vector<Pt>& v, float px, float py, float* out, int count) {
+    auto it = std::lower_bound(v.begin(), v.end(), px - 20.f,
+        [](const Pt& a, float val) { return a.x < val; });
+    int n = 0;
+    for (; it != v.end() && n < count; ++it) {
+        float dx = it->x - px;
+        if (dx > 400.f) break;
+        out[n * 2] = dx / 300.f;
+        out[n * 2 + 1] = (it->y - py) / 150.f;
+        n++;
+    }
+    for (; n < count; ++n) {   // nada a la vista
+        out[n * 2] = 2.0f;
+        out[n * 2 + 1] = 0.f;
+    }
 }
 
 // ---------- Conexion con Python ----------
@@ -37,7 +62,7 @@ static bool connectToPython() {
     addr.sin_family = AF_INET;
     addr.sin_port = htons(5555);
     addr.sin_addr.s_addr = inet_addr("127.0.0.1");
-    
+
     if (connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
         closesocket(s);
         return false;
@@ -78,7 +103,43 @@ class $modify(BotPlayLayer, PlayLayer) {
         float nerves = 0.1f;
         float phase = 0.f;
         CCLabelBMFont* hud = nullptr;
+
+        // ojos
+        std::vector<GameObject*> rawHazards;
+        std::vector<GameObject*> rawSolids;
+        std::vector<Pt> hazards;
+        std::vector<Pt> solids;
+        bool eyesReady = false;
     };
+
+    // Guarda los objetos peligrosos y solidos a medida que se cargan
+    void addObject(GameObject* obj) {
+        PlayLayer::addObject(obj);
+        if (!obj) return;
+        if (obj->m_objectType == GameObjectType::Hazard) {
+            m_fields->rawHazards.push_back(obj);
+        } else if (obj->m_objectType == GameObjectType::Solid) {
+            m_fields->rawSolids.push_back(obj);
+        }
+    }
+
+    // Se ejecuta una vez, en el primer frame, cuando ya estan todas las posiciones
+    void prepareEyes() {
+        for (auto o : m_fields->rawHazards) {
+            m_fields->hazards.push_back({o->getPositionX(), o->getPositionY()});
+        }
+        for (auto o : m_fields->rawSolids) {
+            m_fields->solids.push_back({o->getPositionX(), o->getPositionY()});
+        }
+        auto cmp = [](const Pt& a, const Pt& b) {
+            return a.x < b.x || (a.x == b.x && a.y < b.y);
+        };
+        std::sort(m_fields->hazards.begin(), m_fields->hazards.end(), cmp);
+        std::sort(m_fields->solids.begin(), m_fields->solids.end(), cmp);
+        m_fields->eyesReady = true;
+        log::info("Ojos listos: {} peligros, {} bloques",
+                  m_fields->hazards.size(), m_fields->solids.size());
+    }
 
     std::string bestKey() {
         return fmt::format("best-{}", m_level->m_levelID.value());
@@ -135,6 +196,8 @@ class $modify(BotPlayLayer, PlayLayer) {
 
         if (!botOn) return;
 
+        if (!m_fields->eyesReady) this->prepareEyes();
+
         // --- Conectar con Python (reintenta cada 2 segundos) ---
         if (g_sock == INVALID_SOCKET) {
             g_retryTimer -= dt;
@@ -143,13 +206,22 @@ class $modify(BotPlayLayer, PlayLayer) {
             if (!connectToPython()) return;
         }
 
-        // --- Enviar estado y recibir accion ---
+        // --- Estado + ojos ---
         bool dead = m_player1->m_isDead;
+        float px = m_player1->getPositionX();
         float y = m_player1->getPositionY();
         float yv = static_cast<float>(m_player1->m_yVelocity);
         int ground = m_player1->m_isOnGround ? 1 : 0;
 
+        float hz[8];
+        float sd[6];
+        lookAhead(m_fields->hazards, px, y, hz, 4);
+        lookAhead(m_fields->solids, px, y, sd, 3);
+
         std::string state = fmt::format("{:.4f},{:.2f},{:.3f},{},{}", p, y, yv, ground, dead ? 1 : 0);
+        for (int i = 0; i < 8; i++) state += fmt::format(",{:.3f}", hz[i]);
+        for (int i = 0; i < 6; i++) state += fmt::format(",{:.3f}", sd[i]);
+
         int raw = askPython(state);
         if (raw < 0) return;
 
