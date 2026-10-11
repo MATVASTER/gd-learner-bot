@@ -7,5 +7,19 @@
     "name": "GD Learner Bot",
     "version": "v1.0.0",
     "developer": "matias",
-    "description": "Bot que aprende a jugar Geometry Dash"
+    "description": "Bot que aprende a jugar Geometry Dash",
+    "settings": {
+        "bot-active": {
+            "type": "bool",
+            "name": "Bot activo",
+            "description": "Activa o desactiva el bot",
+            "default": false
+        },
+        "nerves-enabled": {
+            "type": "bool",
+            "name": "Nervios (ritmo cardiaco)",
+            "description": "El bot se pone nervioso al acercarse a su record y comete mas errores",
+            "default": true
+        }
+    }
 }
