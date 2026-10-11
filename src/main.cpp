@@ -20,10 +20,12 @@ static float clampv(float v, float lo, float hi) {
     return std::max(lo, std::min(hi, v));
 }
 
-// 0-3 pads (amarillo, rosa, rojo, azul), 4-10 orbes (amarillo, rosa, rojo, azul, verde, negro, dash),
-// 11 portal de modo, 12 gravedad, 13 tamano, 14 velocidad, 15 dual/espejo/teletransporte
-static const int NFLAG = 16;
+static constexpr int K = 16;       // columnas que ve hacia adelante
+static constexpr int NFLAG = 17;   // tipos de objetos especiales
 
+// 0-3 pads (amarillo, rosa, rojo, azul), 4-10 orbes (amarillo, rosa, rojo, azul, verde, negro, dash),
+// 11 portal de modo, 12 gravedad, 13 tamano, 14 velocidad, 15 dual/espejo/teletransporte,
+// 16 orbe personalizado
 static int specialIndex(GameObject* o) {
     switch (o->m_objectType) {
         case GameObjectType::YellowJumpPad: return 0;
@@ -54,6 +56,7 @@ static int specialIndex(GameObject* o) {
         case GameObjectType::InverseMirrorPortal:
         case GameObjectType::NormalMirrorPortal:
         case GameObjectType::TeleportPortal: return 15;
+        case GameObjectType::CustomRing: return 16;
         default: break;
     }
     switch (o->m_objectID) {
@@ -61,6 +64,26 @@ static int specialIndex(GameObject* o) {
         default: return -1;
     }
 }
+
+static int modeOf(PlayerObject* pl) {
+    if (pl->m_isShip) return 1;
+    if (pl->m_isBall) return 2;
+    if (pl->m_isBird) return 3;
+    if (pl->m_isDart) return 4;
+    if (pl->m_isRobot) return 5;
+    if (pl->m_isSpider) return 6;
+    return 0;
+}
+
+// Lo que ve de cada columna desde la altura de un jugador
+struct Col {
+    float below = 90.f;
+    float above = 0.f;
+    float hazRel = 0.f;
+    float bestHaz = 1e9f;
+    int block = 0;
+    int haz = 0;
+};
 
 // ---------- Rotacion de niveles ----------
 static int g_deathsOnLevel = 0;
@@ -255,6 +278,44 @@ class $modify(BotPlayLayer, PlayLayer) {
                   m_fields->rawSlopes.size(), m_fields->rawSpecials.size());
     }
 
+    // Suelo, techo, muros y pinchos de cada columna, vistos desde la altura refY
+    void scanCols(float refY, float px, Col* out) {
+        for (int k = 0; k < K; k++) {
+            out[k] = Col();
+            out[k].above = refY + 999.f;
+        }
+        for (auto o : m_fields->rawSolids) {
+            float ox = o->getPositionX();
+            if (ox < px - 100.f || ox > px + 620.f) continue;
+            CCRect r = o->getObjectRect();
+            int a = std::max(static_cast<int>(std::floor((r.getMinX() + 1.f - px) / 30.f)), 0);
+            int b = std::min(static_cast<int>(std::floor((r.getMaxX() - 1.f - px) / 30.f)), K - 1);
+            float bot = r.getMinY();
+            float top = r.getMaxY();
+            for (int k = a; k <= b; k++) {
+                if (bot < refY + 12.f && top > refY - 12.f) {
+                    out[k].block = 1;
+                } else if (top <= refY - 12.f) {
+                    out[k].below = std::max(out[k].below, top);
+                } else {
+                    out[k].above = std::min(out[k].above, bot);
+                }
+            }
+        }
+        for (auto o : m_fields->rawHazards) {
+            float ox = o->getPositionX();
+            int k = static_cast<int>(std::floor((ox - px) / 30.f));
+            if (k < 0 || k >= K) continue;
+            float oy = o->getPositionY();
+            out[k].haz = 1;
+            float d = std::fabs(oy - refY);
+            if (d < out[k].bestHaz) {
+                out[k].bestHaz = d;
+                out[k].hazRel = clampv((oy - refY) / 60.f, -3.f, 3.f);
+            }
+        }
+    }
+
     // status: 0 = jugando, 1 = muerto, 2 = nivel completado
     std::string makeState(int status) {
         float p = this->getCurrentPercent();
@@ -265,82 +326,69 @@ class $modify(BotPlayLayer, PlayLayer) {
         int upside = m_player1->m_isUpsideDown ? 1 : 0;
         int mini = m_player1->m_vehicleSize < 0.9f ? 1 : 0;
         float speed = static_cast<float>(m_player1->m_playerSpeed);
-        int mode = 0;
-        if (m_player1->m_isShip) mode = 1;
-        else if (m_player1->m_isBall) mode = 2;
-        else if (m_player1->m_isBird) mode = 3;
-        else if (m_player1->m_isDart) mode = 4;
-        else if (m_player1->m_isRobot) mode = 5;
-        else if (m_player1->m_isSpider) mode = 6;
+        int mode = modeOf(m_player1);
+
+        // segundo jugador (modo dual)
+        bool dual = m_player2 && m_gameState.m_isDualMode;
+        float y2 = 0.f;
+        float yv2 = 0.f;
+        int ground2 = 0;
+        int upside2 = 0;
+        int mode2 = 0;
+        if (dual) {
+            y2 = m_player2->getPositionY();
+            yv2 = static_cast<float>(m_player2->m_yVelocity);
+            ground2 = m_player2->m_isOnGround ? 1 : 0;
+            upside2 = m_player2->m_isUpsideDown ? 1 : 0;
+            mode2 = modeOf(m_player2);
+        }
 
         int levelId = static_cast<int>(m_level->m_levelID.value());
         int passed = static_cast<int>(
             std::lower_bound(m_fields->clusterX.begin(), m_fields->clusterX.end(), px) -
             m_fields->clusterX.begin());
 
-        std::string s = fmt::format("{},{:.4f},{},{},{:.2f},{:.3f},{},{},{},{:.2f},{}",
-                                    status, p, levelId, passed, y, yv, ground, upside, mini, speed, mode);
+        std::string s = fmt::format(
+            "{},{:.4f},{},{},{:.2f},{:.3f},{},{},{},{:.2f},{},{},{:.2f},{:.3f},{},{},{}",
+            status, p, levelId, passed, y, yv, ground, upside, mini, speed, mode,
+            dual ? 1 : 0, y2, yv2, ground2, upside2, mode2);
 
-        constexpr int K = 16;
-        float below[K], above[K], hazRel[K], bestHaz[K], specRel[K], bestSpec[K];
-        int block[K], haz[K], slope[K];
+        Col c1[K];
+        Col c2[K];
+        this->scanCols(y, px, c1);
+        if (dual) this->scanCols(y2, px, c2);
+
+        // rampas y objetos especiales (siempre desde el jugador 1)
+        struct Slp { int has = 0; float rel = 0.f; float sn = 0.f; float cs = 0.f; float flip = 0.f; float best = 1e9f; };
+        Slp slp[K];
         int flags[K][NFLAG];
+        float specRel[K];
+        float bestSpec[K];
         for (int k = 0; k < K; k++) {
-            below[k] = 90.f;
-            above[k] = y + 999.f;
-            hazRel[k] = 0.f;
-            bestHaz[k] = 1e9f;
             specRel[k] = 0.f;
             bestSpec[k] = 1e9f;
-            block[k] = 0;
-            haz[k] = 0;
-            slope[k] = 0;
             for (int j = 0; j < NFLAG; j++) flags[k][j] = 0;
         }
 
-        auto colRange = [&](float x0, float x1, int& a, int& b) {
-            a = std::max(static_cast<int>(std::floor((x0 - px) / 30.f)), 0);
-            b = std::min(static_cast<int>(std::floor((x1 - px) / 30.f)), K - 1);
-        };
-
-        for (auto o : m_fields->rawSolids) {
-            float ox = o->getPositionX();
-            if (ox < px - 100.f || ox > px + 620.f) continue;
-            float oy = o->getPositionY();
-            float w = std::fabs(o->getContentSize().width * o->getScaleX());
-            float h = std::fabs(o->getContentSize().height * o->getScaleY()) * 0.5f;
-            int a, b;
-            colRange(ox - w * 0.5f + 1.f, ox + w * 0.5f - 1.f, a, b);
-            float bot = oy - h;
-            float top = oy + h;
-            for (int k = a; k <= b; k++) {
-                if (bot < y + 12.f && top > y - 12.f) {
-                    block[k] = 1;
-                } else if (top <= y - 12.f) {
-                    below[k] = std::max(below[k], top);
-                } else {
-                    above[k] = std::min(above[k], bot);
-                }
-            }
-        }
         for (auto o : m_fields->rawSlopes) {
             float ox = o->getPositionX();
             if (ox < px - 100.f || ox > px + 620.f) continue;
-            float w = std::fabs(o->getContentSize().width * o->getScaleX());
-            int a, b;
-            colRange(ox - w * 0.5f + 1.f, ox + w * 0.5f - 1.f, a, b);
-            for (int k = a; k <= b; k++) slope[k] = 1;
-        }
-        for (auto o : m_fields->rawHazards) {
-            float ox = o->getPositionX();
-            int k = static_cast<int>(std::floor((ox - px) / 30.f));
-            if (k < 0 || k >= K) continue;
-            float oy = o->getPositionY();
-            haz[k] = 1;
-            float d = std::fabs(oy - y);
-            if (d < bestHaz[k]) {
-                bestHaz[k] = d;
-                hazRel[k] = clampv((oy - y) / 60.f, -3.f, 3.f);
+            CCRect r = o->getObjectRect();
+            int a = std::max(static_cast<int>(std::floor((r.getMinX() + 1.f - px) / 30.f)), 0);
+            int b = std::min(static_cast<int>(std::floor((r.getMaxX() - 1.f - px) / 30.f)), K - 1);
+            float cy = (r.getMinY() + r.getMaxY()) * 0.5f;
+            float d = std::fabs(cy - y);
+            float rad = o->getRotation() * 0.0174533f;
+            float flip = ((o->isFlipX() ? 1.f : 0.f) + (o->isFlipY() ? 2.f : 0.f)) / 3.f;
+            for (int k = a; k <= b; k++) {
+                if (d < slp[k].best) {
+                    slp[k].best = d;
+                    slp[k].has = 1;
+                    slp[k].rel = clampv((cy - y) / 60.f, -3.f, 3.f);
+                    slp[k].sn = std::sin(rad);
+                    slp[k].cs = std::cos(rad);
+                    slp[k].flip = flip;
+                }
             }
         }
         for (auto& pr : m_fields->rawSpecials) {
@@ -357,14 +405,32 @@ class $modify(BotPlayLayer, PlayLayer) {
         }
 
         for (int k = 0; k < K; k++) {
-            float relBelow = clampv((below[k] - y) / 60.f, -3.f, 0.f);
-            float relAbove = clampv((above[k] - y) / 60.f, 0.f, 3.f);
-            s += fmt::format(",{:.2f},{:.2f},{},{},{:.2f},{}", relBelow, relAbove,
-                             block[k], haz[k], hazRel[k], slope[k]);
+            // jugador 1
+            float relBelow = clampv((c1[k].below - y) / 60.f, -3.f, 0.f);
+            float relAbove = clampv((c1[k].above - y) / 60.f, 0.f, 3.f);
+            s += fmt::format(",{:.2f},{:.2f},{},{},{:.2f}", relBelow, relAbove,
+                             c1[k].block, c1[k].haz, c1[k].hazRel);
+            // rampa
+            s += fmt::format(",{},{:.2f},{:.2f},{:.2f},{:.2f}", slp[k].has, slp[k].rel,
+                             slp[k].sn, slp[k].cs, slp[k].flip);
+            // pads, orbes, portales
             for (int j = 0; j < NFLAG; j++) s += fmt::format(",{}", flags[k][j]);
             s += fmt::format(",{:.2f}", specRel[k]);
+            // jugador 2 (ceros si no hay dual)
+            if (dual) {
+                float rb2 = clampv((c2[k].below - y2) / 60.f, -3.f, 0.f);
+                float ra2 = clampv((c2[k].above - y2) / 60.f, 0.f, 3.f);
+                s += fmt::format(",{:.2f},{:.2f},{},{},{:.2f}", rb2, ra2,
+                                 c2[k].block, c2[k].haz, c2[k].hazRel);
+            } else {
+                s += ",0.00,0.00,0,0,0.00";
+            }
         }
         return s;
+    }
+
+    bool anyDead() {
+        return m_player1->m_isDead || (m_player2 && m_player2->m_isDead);
     }
 
     std::string bestKey() {
@@ -397,7 +463,7 @@ class $modify(BotPlayLayer, PlayLayer) {
 
     void recordFrame() {
         if (!m_fields->eyesReady) this->prepareEyes();
-        if (m_player1->m_isDead) {
+        if (this->anyDead()) {
             if (!m_fields->recDead && m_fields->recRows > 0) recWrite("END,0");
             m_fields->recDead = true;
             return;
@@ -452,7 +518,7 @@ class $modify(BotPlayLayer, PlayLayer) {
             if (!connectToPython()) return;
         }
 
-        bool dead = m_player1->m_isDead;
+        bool dead = this->anyDead();
         int raw = askPython(this->makeState(dead ? 1 : 0));
         if (raw < 0) return;
 
