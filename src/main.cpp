@@ -1,8 +1,13 @@
+#define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <ws2tcpip.h>
+
 #include <Geode/Geode.hpp>
 #include <Geode/modify/PlayLayer.hpp>
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <string>
 
 using namespace geode::prelude;
 
@@ -10,13 +15,70 @@ static float rand01() {
     return static_cast<float>(std::rand()) / static_cast<float>(RAND_MAX);
 }
 
+// ---------- Conexion con Python ----------
+static SOCKET g_sock = INVALID_SOCKET;
+static bool g_wsaReady = false;
+static float g_retryTimer = 0.f;
+
+static void closeSock() {
+    if (g_sock != INVALID_SOCKET) {
+        closesocket(g_sock);
+        g_sock = INVALID_SOCKET;
+    }
+}
+
+static bool connectToPython() {
+    if (g_sock != INVALID_SOCKET) return true;
+    if (!g_wsaReady) {
+        WSADATA wsa;
+        if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return false;
+        g_wsaReady = true;
+    }
+    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s == INVALID_SOCKET) return false;
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(5555);
+    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+
+    if (connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        closesocket(s);
+        return false;
+    }
+    int one = 1;
+    setsockopt(s, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&one), sizeof(one));
+    DWORD timeout = 5000;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+
+    g_sock = s;
+    log::info("Conectado a Python");
+    return true;
+}
+
+// Devuelve -1 si fallo la comunicacion, o la accion (0 = soltar, 1 = mantener)
+static int askPython(const std::string& state) {
+    std::string msg = state + "\n";
+    if (send(g_sock, msg.c_str(), static_cast<int>(msg.size()), 0) == SOCKET_ERROR) {
+        closeSock();
+        return -1;
+    }
+    char buf[8];
+    int n = recv(g_sock, buf, sizeof(buf), 0);
+    if (n <= 0) {
+        closeSock();
+        return -1;
+    }
+    return buf[0] == '1' ? 1 : 0;
+}
+
+// ---------- Mod ----------
 class $modify(BotPlayLayer, PlayLayer) {
     struct Fields {
-        float timer = 0.f;
-        float interval = 1.0f;
         bool pressed = false;
-        float nerves = 0.1f;   // 0.1 = tranquilo, 1.0 = maximo
-        float phase = 0.f;     // para el latido
+        int delay = -1;        // retraso por nervios (frames), -1 = sin calcular
+        float nerves = 0.1f;
+        float phase = 0.f;
         CCLabelBMFont* hud = nullptr;
     };
 
@@ -28,28 +90,24 @@ class $modify(BotPlayLayer, PlayLayer) {
         return Mod::get()->getSavedValue<float>(this->bestKey(), 0.f);
     }
 
-    // Nervios segun la cercania al mejor progreso
-    // Nervios segun la cercania al mejor progreso
     float targetNerves(float p, float best) {
-        const float MIN_RECORD = 20.f;         // por debajo de este record no hay nervios
+        const float MIN_RECORD = 20.f;
         if (best < MIN_RECORD) return 0.1f;
-        if (p >= best) return 1.0f;            // zona desconocida: maximo
-        float window = std::min(15.f, best * 0.5f); // desde cuantos % antes empieza a subir
+        if (p >= best) return 1.0f;
+        float window = std::min(15.f, best * 0.5f);
         float d = best - p;
         float k = std::clamp(1.f - d / window, 0.f, 1.f);
         return 0.1f + 0.9f * k;
     }
-    
+
     void resetLevel() {
         PlayLayer::resetLevel();
-        m_fields->timer = 0.f;
-        m_fields->interval = 1.0f;
         m_fields->pressed = false;
+        m_fields->delay = -1;
     }
 
     void postUpdate(float dt) {
         PlayLayer::postUpdate(dt);
-
         if (!m_player1) return;
 
         bool botOn = Mod::get()->getSettingValue<bool>("bot-active");
@@ -77,25 +135,54 @@ class $modify(BotPlayLayer, PlayLayer) {
         GLubyte g = static_cast<GLubyte>(255.f * (1.f - m_fields->nerves));
         m_fields->hud->setColor(ccColor3B{255, g, g});
 
-        // --- Bot ---
         if (!botOn) return;
-        if (m_player1->m_isDead) return;
 
-        m_fields->timer += dt;
+        // --- Conectar con Python (reintenta cada 2 segundos) ---
+        if (g_sock == INVALID_SOCKET) {
+            g_retryTimer -= dt;
+            if (g_retryTimer > 0.f) return;
+            g_retryTimer = 2.f;
+            if (!connectToPython()) return;
+        }
+
+        // --- Enviar estado y recibir accion ---
+        bool dead = m_player1->m_isDead;
+        float y = m_player1->getPositionY();
+        float yv = static_cast<float>(m_player1->m_yVelocity);
+        int ground = m_player1->m_isOnGround ? 1 : 0;
+
+        std::string state = fmt::format("{:.4f},{:.2f},{:.3f},{},{}", p, y, yv, ground, dead ? 1 : 0);
+        int raw = askPython(state);
+        if (raw < 0) return;
+
+        if (dead) {
+            m_fields->pressed = false;
+            m_fields->delay = -1;
+            return;
+        }
+
+        // --- Aplicar la accion (con retraso si esta nervioso) ---
+        int action = raw;
         float n = nervesOn ? m_fields->nerves : 0.f;
 
-        if (!m_fields->pressed && m_fields->timer >= m_fields->interval) {
-            m_fields->timer = 0.f;
-            // con nervios el ritmo se vuelve irregular
-            m_fields->interval = 1.0f + (rand01() - 0.5f) * 0.6f * n;
-            // a veces se le pasa el salto
-            if (rand01() < n * 0.25f) return;
+        if (raw == 0) m_fields->delay = -1;
+        if (action == 1 && !m_fields->pressed) {
+            if (m_fields->delay < 0) {
+                m_fields->delay = (rand01() < n * 0.35f) ? 2 + (std::rand() % 8) : 0;
+            }
+            if (m_fields->delay > 0) {
+                m_fields->delay--;
+                action = 0;
+            }
+        }
+
+        if (action == 1 && !m_fields->pressed) {
             this->handleButton(true, 1, true);
             m_fields->pressed = true;
-        } else if (m_fields->pressed && m_fields->timer >= 0.1f) {
+            m_fields->delay = -1;
+        } else if (action == 0 && m_fields->pressed) {
             this->handleButton(false, 1, true);
             m_fields->pressed = false;
-            m_fields->timer = 0.f;
         }
     }
 
@@ -107,7 +194,6 @@ class $modify(BotPlayLayer, PlayLayer) {
             if (p > this->bestPercent()) {
                 Mod::get()->setSavedValue<float>(this->bestKey(), p);
             }
-            log::info("El jugador murio en {}%", static_cast<int>(p));
         }
     }
 };
