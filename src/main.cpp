@@ -44,7 +44,7 @@ static bool connectToPython() {
     }
     int one = 1;
     setsockopt(s, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&one), sizeof(one));
-    DWORD timeout = 5000;
+    DWORD timeout = 120000;
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
 
     g_sock = s;
@@ -56,12 +56,14 @@ static bool connectToPython() {
 static int askPython(const std::string& state) {
     std::string msg = state + "\n";
     if (send(g_sock, msg.c_str(), static_cast<int>(msg.size()), 0) == SOCKET_ERROR) {
+        log::warn("Fallo al enviar a Python (error {})", WSAGetLastError());
         closeSock();
         return -1;
     }
     char buf[8];
     int n = recv(g_sock, buf, sizeof(buf), 0);
     if (n <= 0) {
+        log::warn("Python no respondio (n={}, error {})", n, WSAGetLastError());
         closeSock();
         return -1;
     }
