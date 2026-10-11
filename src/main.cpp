@@ -12,30 +12,6 @@ static float rand01() {
     return static_cast<float>(std::rand()) / static_cast<float>(RAND_MAX);
 }
 
-// ---------- Ojos ----------
-struct Pt {
-    float x;
-    float y;
-};
-
-// Llena 'out' con (dx, dy) de los 'count' objetos mas cercanos por delante
-static void lookAhead(const std::vector<Pt>& v, float px, float py, float* out, int count) {
-    auto it = std::lower_bound(v.begin(), v.end(), px - 20.f,
-        [](const Pt& a, float val) { return a.x < val; });
-    int n = 0;
-    for (; it != v.end() && n < count; ++it) {
-        float dx = it->x - px;
-        if (dx > 400.f) break;
-        out[n * 2] = dx / 300.f;
-        out[n * 2 + 1] = (it->y - py) / 150.f;
-        n++;
-    }
-    for (; n < count; ++n) {   // nada a la vista
-        out[n * 2] = 2.0f;
-        out[n * 2 + 1] = 0.f;
-    }
-}
-
 // ---------- Conexion con Python ----------
 static SOCKET g_sock = INVALID_SOCKET;
 static bool g_wsaReady = false;
@@ -104,11 +80,12 @@ class $modify(BotPlayLayer, PlayLayer) {
         float phase = 0.f;
         CCLabelBMFont* hud = nullptr;
 
-        // ojos
+        // ojos: perfil del terreno por columnas de 30 unidades
         std::vector<GameObject*> rawHazards;
         std::vector<GameObject*> rawSolids;
-        std::vector<Pt> hazards;
-        std::vector<Pt> solids;
+        std::vector<float> colTop;    // altura de la superficie en cada columna
+        std::vector<float> colHazY;   // altura del peligro mas bajo en cada columna
+        std::vector<char> colHaz;     // 1 si hay un peligro en la columna
         bool eyesReady = false;
     };
 
@@ -125,20 +102,40 @@ class $modify(BotPlayLayer, PlayLayer) {
 
     // Se ejecuta una vez, en el primer frame, cuando ya estan todas las posiciones
     void prepareEyes() {
-        for (auto o : m_fields->rawHazards) {
-            m_fields->hazards.push_back({o->getPositionX(), o->getPositionY()});
-        }
+        float maxX = 0.f;
+        for (auto o : m_fields->rawSolids) maxX = std::max(maxX, o->getPositionX());
+        for (auto o : m_fields->rawHazards) maxX = std::max(maxX, o->getPositionX());
+        int cols = static_cast<int>(maxX / 30.f) + 60;
+
+        m_fields->colTop.assign(cols, 90.f);   // 90 = el suelo
+        m_fields->colHazY.assign(cols, 0.f);
+        m_fields->colHaz.assign(cols, 0);
+
         for (auto o : m_fields->rawSolids) {
-            m_fields->solids.push_back({o->getPositionX(), o->getPositionY()});
+            float x = o->getPositionX();
+            float w = o->getContentSize().width * o->getScaleX();
+            float h = o->getContentSize().height * o->getScaleY() * 0.5f;
+            float top = o->getPositionY() + h;
+            int c0 = static_cast<int>((x - w * 0.5f + 1.f) / 30.f);
+            int c1 = static_cast<int>((x + w * 0.5f - 1.f) / 30.f);
+            for (int c = std::max(c0, 0); c <= c1 && c < cols; ++c) {
+                m_fields->colTop[c] = std::max(m_fields->colTop[c], top);
+            }
         }
-        auto cmp = [](const Pt& a, const Pt& b) {
-            return a.x < b.x || (a.x == b.x && a.y < b.y);
-        };
-        std::sort(m_fields->hazards.begin(), m_fields->hazards.end(), cmp);
-        std::sort(m_fields->solids.begin(), m_fields->solids.end(), cmp);
+        for (auto o : m_fields->rawHazards) {
+            int c = static_cast<int>(o->getPositionX() / 30.f);
+            if (c < 0 || c >= cols) continue;
+            float hy = o->getPositionY();
+            if (!m_fields->colHaz[c]) {
+                m_fields->colHaz[c] = 1;
+                m_fields->colHazY[c] = hy;
+            } else {
+                m_fields->colHazY[c] = std::min(m_fields->colHazY[c], hy);
+            }
+        }
         m_fields->eyesReady = true;
-        log::info("Ojos listos: {} peligros, {} bloques",
-                  m_fields->hazards.size(), m_fields->solids.size());
+        log::info("Ojos listos: {} columnas, {} peligros, {} bloques",
+                  cols, m_fields->rawHazards.size(), m_fields->rawSolids.size());
     }
 
     std::string bestKey() {
@@ -213,14 +210,25 @@ class $modify(BotPlayLayer, PlayLayer) {
         float yv = static_cast<float>(m_player1->m_yVelocity);
         int ground = m_player1->m_isOnGround ? 1 : 0;
 
-        float hz[8];
-        float sd[6];
-        lookAhead(m_fields->hazards, px, y, hz, 4);
-        lookAhead(m_fields->solids, px, y, sd, 3);
-
         std::string state = fmt::format("{:.4f},{:.2f},{:.3f},{},{}", p, y, yv, ground, dead ? 1 : 0);
-        for (int i = 0; i < 8; i++) state += fmt::format(",{:.3f}", hz[i]);
-        for (int i = 0; i < 6; i++) state += fmt::format(",{:.3f}", sd[i]);
+
+        int c0 = static_cast<int>(px / 30.f);
+        float feet = y - 15.f;
+        int total = static_cast<int>(m_fields->colTop.size());
+        for (int k = 0; k < 12; k++) {
+            int c = c0 + k;
+            float top = 90.f;
+            int haz = 0;
+            float hy = 0.f;
+            if (c >= 0 && c < total) {
+                top = m_fields->colTop[c];
+                haz = m_fields->colHaz[c];
+                hy = m_fields->colHazY[c];
+            }
+            float relTop = std::clamp((top - feet) / 60.f, -3.f, 3.f);
+            float relHaz = haz ? std::clamp((hy - y) / 60.f, -3.f, 3.f) : 0.f;
+            state += fmt::format(",{:.2f},{},{:.2f}", relTop, haz, relHaz);
+        }
 
         int raw = askPython(state);
         if (raw < 0) return;
