@@ -5,7 +5,7 @@
     },
     "id": "matvaster.gd-learner-bot",
     "name": "GD Learner Bot",
-    "version": "v2.1.0",
+    "version": "v3.0.0",
     "developer": "matias",
     "description": "Bot que aprende a jugar Geometry Dash",
     "settings": {
@@ -13,6 +13,12 @@
             "type": "bool",
             "name": "Bot activo",
             "description": "Activa o desactiva el bot",
+            "default": false
+        },
+        "record-mode": {
+            "type": "bool",
+            "name": "Grabar mi gameplay",
+            "description": "Con el bot apagado, graba lo que ve el bot y lo que haces tu, para entrenarlo por imitacion",
             "default": false
         },
         "nerves-enabled": {
@@ -37,7 +43,7 @@
             "type": "int",
             "name": "Intentos por nivel",
             "description": "Cuantas muertes antes de pasar al siguiente nivel",
-            "default": 40,
+            "default": 10,
             "min": 1,
             "max": 1000
         },
