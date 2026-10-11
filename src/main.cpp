@@ -14,7 +14,7 @@ static float rand01() {
     return static_cast<float>(std::rand()) / static_cast<float>(RAND_MAX);
 }
 
-static float clampf(float v, float lo, float hi) {
+static float clampv(float v, float lo, float hi) {
     return std::max(lo, std::min(hi, v));
 }
 
@@ -297,7 +297,7 @@ class $modify(BotPlayLayer, PlayLayer) {
                     float d = std::fabs(hy - y);
                     if (d < bestHaz) {
                         bestHaz = d;
-                        hazRel = clampf((hy - y) / 60.f, -3.f, 3.f);
+                        hazRel = clampv((hy - y) / 60.f, -3.f, 3.f);
                     }
                 }
                 for (int j = 0; j < 6; j++) {
@@ -307,13 +307,13 @@ class $modify(BotPlayLayer, PlayLayer) {
                         float d = std::fabs(sy - y);
                         if (d < bestSpec) {
                             bestSpec = d;
-                            specRel = clampf((sy - y) / 60.f, -3.f, 3.f);
+                            specRel = clampv((sy - y) / 60.f, -3.f, 3.f);
                         }
                     }
                 }
             }
-            float relBelow = clampf((below - y) / 60.f, -3.f, 0.f);
-            float relAbove = clampf((above - y) / 60.f, 0.f, 3.f);
+            float relBelow = clampv((below - y) / 60.f, -3.f, 0.f);
+            float relAbove = clampv((above - y) / 60.f, 0.f, 3.f);
             s += fmt::format(",{:.2f},{:.2f},{},{},{:.2f},{},{},{},{},{},{},{:.2f}",
                              relBelow, relAbove, block, haz, hazRel,
                              flags[0], flags[1], flags[2], flags[3], flags[4], flags[5], specRel);
