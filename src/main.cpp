@@ -306,7 +306,7 @@ class $modify(BotPlayLayer, PlayLayer) {
             float top = r.getMaxY();
             for (int k = a; k <= b; k++) {
                 if (bot < refY + 12.f && top > refY - 12.f) {
-                    out[k].block = 1;
+                    out[k].block = 1; out[k].below = std::max(out[k].below, top);
                 } else if (top <= refY - 12.f) {
                     out[k].below = std::max(out[k].below, top);
                 } else {
