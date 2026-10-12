@@ -337,7 +337,7 @@ class $modify(BotPlayLayer, PlayLayer) {
                 out[k].haz = 1;
                 if (dv < out[k].bestHaz) {
                     out[k].bestHaz = dv;
-                    out[k].hazRel = clampv(rel, -3.f, 3.f);
+                    out[k].hazRel = clampv((r.getMinX() - px - 30.f * k) / 30.f, -20.f, 20.f);
                     out[k].hazBot = clampv((bot - refY) / 60.f, -3.f, 3.f);
                     out[k].hazTop = clampv((top - refY) / 60.f, -3.f, 3.f);
                 }
