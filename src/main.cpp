@@ -320,7 +320,8 @@ class $modify(BotPlayLayer, PlayLayer) {
             CCRect r = hazardRect(o);
             int a = std::max(static_cast<int>(std::floor((r.getMinX() + 1.f - px) / 30.f)), 0);
             int b = std::min(static_cast<int>(std::floor((r.getMaxX() - 1.f - px) / 30.f)), K - 1);
-            if (b < a) continue;
+            if (r.getMaxX() < px - 15.f) continue;
+            if (b < a) b = a;
             if (a >= K) continue;
             float bot = r.getMinY();
             float top = r.getMaxY();
